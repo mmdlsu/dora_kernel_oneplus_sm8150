@@ -473,7 +473,8 @@ gss_wrap_kerberos_v2(struct krb5_ctx *kctx, u32 offset,
 	*ptr++ = 0xff;
 	be16ptr = (__be16 *)ptr;
 
-	blocksize = crypto_skcipher_blocksize(kctx->acceptor_enc);
+	/* kctx->acceptor_enc is a crypto_sync_skcipher; use the sync helper */
+	blocksize = crypto_sync_skcipher_blocksize(kctx->acceptor_enc);
 	*be16ptr++ = 0;
 	/* "inner" token header always uses 0 for RRC */
 	*be16ptr++ = 0;
@@ -623,4 +624,3 @@ gss_unwrap_kerberos(struct gss_ctx *gctx, int offset, struct xdr_buf *buf)
 		return gss_unwrap_kerberos_v2(kctx, offset, buf);
 	}
 }
-
