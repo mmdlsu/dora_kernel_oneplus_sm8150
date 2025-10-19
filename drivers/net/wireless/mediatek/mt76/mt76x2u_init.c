@@ -18,6 +18,50 @@
 
 #include "mt76x2u.h"
 #include "mt76x2_eeprom.h"
+#include "mt76x2_mcu.h"
+
+/* Simple LED switch: On by default; 1 = On (always on when plugged in), 0 = Off (no LED registration) */
+static int led_enable = 1;
+module_param(led_enable, int, 0644);
+MODULE_PARM_DESC(led_enable, "Enable simple LED (1=on,0=off), default 1");
+
+#if IS_ENABLED(CONFIG_MT76_LEDS)
+/* Directly write LED configuration (hardware always on/off) to avoid software flickering and instability */
+static void mt76x2u_led_set_config(struct mt76_dev *mt76, u8 delay_on, u8 delay_off)
+{
+    struct mt76x2_dev *dev = container_of(mt76, struct mt76x2_dev, mt76);
+    u32 val = MT_LED_STATUS_DURATION(0xff) |
+              MT_LED_STATUS_OFF(delay_off) |
+              MT_LED_STATUS_ON(delay_on);
+
+    mt76_wr(dev, MT_LED_S0(mt76->led_pin), val);
+    mt76_wr(dev, MT_LED_S1(mt76->led_pin), val);
+
+    val = MT_LED_CTRL_REPLAY(mt76->led_pin) | MT_LED_CTRL_KICK(mt76->led_pin);
+    if (mt76->led_al)
+        val |= MT_LED_CTRL_POLARITY(mt76->led_pin);
+    mt76_wr(dev, MT_LED_CTRL, val);
+}
+
+static void mt76x2u_led_set_brightness(struct led_classdev *led_cdev,
+                                       enum led_brightness brightness)
+{
+    struct mt76_dev *mt76 = container_of(led_cdev, struct mt76_dev, led_cdev);
+
+    if (!brightness)
+        mt76x2u_led_set_config(mt76, 0, 0xff);   /* close */
+    else
+        mt76x2u_led_set_config(mt76, 0xff, 0x00); /* open */
+}
+
+/* Empty implementation, swallowing software/trigger flicker, avoiding frequent register writes in monitoring mode */
+static int mt76x2u_led_set_blink_stub(struct led_classdev *led_cdev,
+                                      unsigned long *delay_on,
+                                      unsigned long *delay_off)
+{
+    return 0;
+}
+#endif
 
 static void mt76x2u_init_dma(struct mt76x2_dev *dev)
 {
@@ -253,9 +297,9 @@ int mt76x2u_init_hardware(struct mt76x2_dev *dev)
 
 int mt76x2u_register_device(struct mt76x2_dev *dev)
 {
-	struct ieee80211_hw *hw = mt76_hw(dev);
-	struct wiphy *wiphy = hw->wiphy;
-	int err;
+    struct ieee80211_hw *hw = mt76_hw(dev);
+    struct wiphy *wiphy = hw->wiphy;
+    int err;
 
 	INIT_DELAYED_WORK(&dev->cal_work, mt76x2u_phy_calibrate);
 	mt76x2_init_device(dev);
@@ -276,12 +320,24 @@ int mt76x2u_register_device(struct mt76x2_dev *dev)
 	if (err < 0)
 		goto fail;
 
-	wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
+    wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
+
+#if IS_ENABLED(CONFIG_MT76_LEDS)
+    if (led_enable) {
+        /* Fixed the current hardware connection: pin = 2, low level lights up. If you need to adapt to other network cards, you can adjust this */
+        dev->mt76.led_pin = 2;
+        dev->mt76.led_al  = true;
+        /* Write the register only once before registration to set it to always on; do not register LED devices to avoid any subsequent flashing/writing */
+        mt76x2u_led_set_config(&dev->mt76, 0xff, 0x00);
+    }
+#endif
 
 	err = mt76_register_device(&dev->mt76, true, mt76x2_rates,
 				   ARRAY_SIZE(mt76x2_rates));
-	if (err)
-		goto fail;
+    if (err)
+        goto fail;
+
+    /* Do not register LED devices and do not perform any subsequent LED writes to ensure stable monitoring/injection */
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(4,6,7)
 	/* check hw sg support in order to enable AMSDU */
